@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
+#include <poll.h>
+#include <sys/timerfd.h>
 #include <wayland-client.h>
 #include "background-image.h"
 #include "cairo_util.h"
@@ -43,7 +46,7 @@ struct swaybg_state {
 	struct wp_single_pixel_buffer_manager_v1 *single_pixel_buffer_manager;
 	struct wl_list configs;  // struct swaybg_output_config::link
 	struct wl_list outputs;  // struct swaybg_output::link
-	struct wl_list images;   // struct swaybg_image::link
+	struct wl_list images;	 // struct swaybg_image::link
 	bool run_display;
 };
 
@@ -116,7 +119,10 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 			output->committed_scale = output->scale;
 		}
-		return;
+
+		if(!surface) {
+			return;
+		}
 	}
 
 	if (output->config->mode == BACKGROUND_MODE_SOLID_COLOR &&
@@ -445,12 +451,12 @@ static void parse_command_line(int argc, char **argv,
 	const char *usage =
 		"Usage: swaybg <options...>\n"
 		"\n"
-		"  -c, --color            Set the background color.\n"
-		"  -h, --help             Show help message and quit.\n"
-		"  -i, --image            Set the image to display.\n"
-		"  -m, --mode             Set the mode to use for the image.\n"
-		"  -o, --output           Set the output to operate on or * for all.\n"
-		"  -v, --version          Show the version number and quit.\n"
+		"  -c, --color			  Set the background color.\n"
+		"  -h, --help			  Show help message and quit.\n"
+		"  -i, --image			  Set the image to display.\n"
+		"  -m, --mode			  Set the mode to use for the image.\n"
+		"  -o, --output			  Set the output to operate on or * for all.\n"
+		"  -v, --version		  Show the version number and quit.\n"
 		"\n"
 		"Background Modes:\n"
 		"  stretch, fit, fill, center, tile, or solid_color\n";
@@ -588,8 +594,43 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
+	int nfds = 2;
+	struct pollfd fds[2];
+	int tfd = timerfd_create(CLOCK_MONOTONIC, 0);
+	int wfd = wl_display_get_fd(state.display);
+	fds[0].fd = tfd;
+	fds[0].events = POLLIN;
+	fds[1].fd = wfd;
+	fds[1].events = POLLIN;
+
+	struct itimerspec next = {0};
+	next.it_value.tv_sec = 60;
+	timerfd_settime(tfd, 0, &next, NULL);
+
 	state.run_display = true;
-	while (wl_display_dispatch(state.display) != -1 && state.run_display) {
+	while(state.run_display) {
+		while (wl_display_prepare_read(state.display) != 0)
+			wl_display_dispatch_pending(state.display);
+		wl_display_flush(state.display);
+
+		int ret = poll(fds, nfds, -1);
+		if (ret < 0)
+				wl_display_cancel_read(state.display);
+		else
+				wl_display_read_events(state.display);
+		wl_display_dispatch_pending(state.display);
+		state.run_display = !wl_display_get_error(state.display);
+
+		// Reload every timer tick
+		if(fds[0].revents & POLLIN) {
+			struct swaybg_output *output;
+			wl_list_for_each(output, &state.outputs, link) {
+				output->dirty = true;
+				output->config->image->load_required = true;
+			}
+			timerfd_settime(tfd, 0, &next, NULL);
+		}
+
 		// Send acks, and determine which images need to be loaded
 		struct swaybg_output *output;
 		wl_list_for_each(output, &state.outputs, link) {

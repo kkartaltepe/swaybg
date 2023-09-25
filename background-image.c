@@ -1,3 +1,7 @@
+#include <dirent.h>
+#include <stdlib.h>
+#include <time.h>
+
 #include <assert.h>
 #include "background-image.h"
 #include "cairo_util.h"
@@ -21,10 +25,72 @@ enum background_mode parse_background_mode(const char *mode) {
 	return BACKGROUND_MODE_INVALID;
 }
 
+unsigned int clamp(unsigned int a, unsigned int low, unsigned int high) {
+	if (a <= low) {
+		return low;
+	}
+	if (a >= high) {
+		return high;
+	}
+	return a;
+}
+
+unsigned int rand_interval(unsigned int min, unsigned int max)
+{
+	static int seeded = 0;
+	if(!seeded) {
+		srand((unsigned int)time(NULL));
+	}
+	unsigned int r = 0;
+	const unsigned int range = clamp(1 + max - min, 0, RAND_MAX);
+	const unsigned int buckets = RAND_MAX / range;
+	const unsigned int limit = buckets * range;
+
+	/* Create equal size buckets all in a row, then fire randomly towards
+	 * the buckets until you land in one of them. All buckets are equally
+	 * likely. If you land off the end of the line of buckets, try again. */
+	do
+	{
+		r = rand();
+	} while (r >= limit);
+
+	return min + (r / buckets);
+}
+
+int path_count = 0;
+char paths[256][1024];
+
+const char *handle_dirs(const char *path) {
+	DIR *d = NULL;
+	struct dirent *e = NULL;
+
+	if(path_count == 0) {
+		d= opendir(path);
+		if(!d) {
+			return path;
+		}
+
+		while((e = readdir(d))) {
+			int plen = strlen(path);
+			memcpy(paths[path_count], path, plen);
+			paths[path_count][plen] = '/';
+			strcpy(&paths[path_count][plen+1], e->d_name);
+			path_count++;
+			e = readdir(d);
+		}
+	}
+
+	int pick = rand_interval(0, path_count-1);
+
+	return paths[pick];
+}
+
 cairo_surface_t *load_background_image(const char *path) {
 	cairo_surface_t *image;
 #if HAVE_GDK_PIXBUF
 	GError *err = NULL;
+	path = handle_dirs(path);
+	swaybg_log(LOG_ERROR, "picked: %s", path);
 	GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(path, &err);
 	if (!pixbuf) {
 		swaybg_log(LOG_ERROR, "Failed to load background image (%s).",
@@ -34,6 +100,7 @@ cairo_surface_t *load_background_image(const char *path) {
 	image = gdk_cairo_image_surface_create_from_pixbuf(pixbuf);
 	g_object_unref(pixbuf);
 #else
+	path = handle_dirs(path);
 	image = cairo_image_surface_create_from_png(path);
 #endif // HAVE_GDK_PIXBUF
 	if (!image) {
